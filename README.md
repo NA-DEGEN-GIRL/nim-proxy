@@ -50,7 +50,7 @@ NVIDIA_API_KEY=nvapi-xxxxxxxxxxxxx
 |------|------|--------|
 | `NVIDIA_API_KEY` | NIM API 키 | (필수) |
 | `NIM_BASE_URL` | NIM API URL | `https://integrate.api.nvidia.com/v1` |
-| `DEFAULT_MODEL` | 기본 모델 | `deepseek-ai/deepseek-v3.2` |
+| `DEFAULT_MODEL` | 기본 모델 | `qwen/qwen3.5-397b-a17b` |
 | `MODEL_MAP` | 모델 매핑 (JSON) | `{}` |
 | `HOST` | 서버 호스트 | `0.0.0.0` |
 | `PORT` | 서버 포트 | `8082` |
@@ -96,7 +96,7 @@ MODEL_MAP={"claude-opus-4-6":"meta/llama-3.1-405b-instruct","claude-sonnet-4-6":
 
 | 모델 | 도구 호출 | 추론 | 설명 |
 |------|----------|------|------|
-| `deepseek-ai/deepseek-v3.2` | O | X | 범용, 고성능 (기본값) |
+| `qwen/qwen3.5-397b-a17b` | O | X | 범용, 고성능 (기본값) |
 | `meta/llama-3.3-70b-instruct` | O | X | 범용, 빠름 |
 | `meta/llama-3.1-405b-instruct` | O | X | 가장 큰 무료 모델 |
 | `deepseek-ai/deepseek-r1` | X | O | 추론 모델 (`<think>` 태그 지원) |
