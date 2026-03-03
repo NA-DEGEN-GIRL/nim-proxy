@@ -30,7 +30,7 @@ load_dotenv()
 
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
 NIM_BASE_URL = os.getenv("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
-DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "meta/llama-3.3-70b-instruct")
+DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "deepseek-ai/deepseek-v3.2")
 MODEL_MAP: dict = json.loads(os.getenv("MODEL_MAP", "{}"))
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8082"))

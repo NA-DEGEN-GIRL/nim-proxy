@@ -50,10 +50,11 @@ NVIDIA_API_KEY=nvapi-xxxxxxxxxxxxx
 |------|------|--------|
 | `NVIDIA_API_KEY` | NIM API 키 | (필수) |
 | `NIM_BASE_URL` | NIM API URL | `https://integrate.api.nvidia.com/v1` |
-| `DEFAULT_MODEL` | 기본 모델 | `meta/llama-3.3-70b-instruct` |
+| `DEFAULT_MODEL` | 기본 모델 | `deepseek-ai/deepseek-v3.2` |
 | `MODEL_MAP` | 모델 매핑 (JSON) | `{}` |
 | `HOST` | 서버 호스트 | `0.0.0.0` |
 | `PORT` | 서버 포트 | `8082` |
+| `TIMEOUT` | NIM 응답 대기 시간 (초) | `600` |
 
 ## 실행
 
@@ -95,12 +96,24 @@ MODEL_MAP={"claude-opus-4-6":"meta/llama-3.1-405b-instruct","claude-sonnet-4-6":
 
 | 모델 | 도구 호출 | 추론 | 설명 |
 |------|----------|------|------|
-| `meta/llama-3.3-70b-instruct` | O | X | 범용, 빠름 (기본값) |
+| `deepseek-ai/deepseek-v3.2` | O | X | 범용, 고성능 (기본값) |
+| `meta/llama-3.3-70b-instruct` | O | X | 범용, 빠름 |
 | `meta/llama-3.1-405b-instruct` | O | X | 가장 큰 무료 모델 |
 | `deepseek-ai/deepseek-r1` | X | O | 추론 모델 (`<think>` 태그 지원) |
 
 > **중요**: Claude Code는 도구 호출(function calling)에 크게 의존합니다.
 > 도구 호출을 지원하는 모델을 사용해야 정상 동작합니다.
+
+## 속도에 대해
+
+NIM API는 **무료**지만 응답 속도가 상당히 느릴 수 있습니다. 특히:
+
+- **무료 티어 제한**: NVIDIA의 무료 크레딧 기반이라 요청이 몰리면 대기열에 걸림
+- **Reasoning 모델** (DeepSeek R1 등): 첫 토큰까지 수십 초 ~ 수 분 걸릴 수 있음
+- **큰 모델** (405B 등): 추론 자체가 느림
+
+프록시의 기본 timeout은 600초(10분)로 설정되어 있어 대부분의 경우 끊기진 않지만,
+체감 속도는 Anthropic API 직접 사용 대비 **상당히 느립니다**. 무료의 대가입니다.
 
 ## 지원 기능
 
