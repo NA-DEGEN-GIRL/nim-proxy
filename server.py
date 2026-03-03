@@ -74,10 +74,13 @@ async def create_message(request: Request):
 
     log.info(f"{original_model} -> {target_model}")
 
-    openai_request = convert_request(body, target_model)
+    openai_request, name_map = convert_request(body, target_model)
+
+    if name_map:
+        log.info(f"Shortened {len(name_map)} tool name(s): {list(name_map.values())}")
 
     return StreamingResponse(
-        content=stream_response(client, openai_request, original_model),
+        content=stream_response(client, openai_request, original_model, name_map),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )

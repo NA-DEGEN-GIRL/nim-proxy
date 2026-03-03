@@ -5,6 +5,7 @@ Converts Claude Code's Anthropic API requests to OpenAI-compatible format
 for NVIDIA NIM, and streams NIM responses back as Anthropic SSE events.
 """
 
+import hashlib
 import json
 import uuid
 from typing import AsyncGenerator
@@ -12,11 +13,41 @@ from typing import AsyncGenerator
 from openai import AsyncOpenAI
 
 
+MAX_TOOL_NAME_LEN = 64
+
+
+def _shorten_tool_name(name: str) -> str:
+    """Shorten a tool name to fit within MAX_TOOL_NAME_LEN using a hash suffix."""
+    if len(name) <= MAX_TOOL_NAME_LEN:
+        return name
+    # Keep as much of the name as possible, append a short hash for uniqueness
+    h = hashlib.md5(name.encode()).hexdigest()[:8]
+    # Reserve 1 char for separator + 8 for hash = 9
+    prefix = name[:MAX_TOOL_NAME_LEN - 9]
+    return f"{prefix}_{h}"
+
+
 # ── Anthropic -> OpenAI Request Conversion ────────────────
 
 
-def convert_request(body: dict, target_model: str) -> dict:
-    """Convert Anthropic MessagesRequest to OpenAI ChatCompletion request."""
+def convert_request(body: dict, target_model: str) -> tuple[dict, dict]:
+    """Convert Anthropic MessagesRequest to OpenAI ChatCompletion request.
+
+    Returns:
+        (openai_request, name_map) where name_map maps shortened names back to originals.
+    """
+    # Build tool name mapping (original -> short, short -> original)
+    name_map: dict[str, str] = {}  # short_name -> original_name
+    fwd_map: dict[str, str] = {}   # original_name -> short_name
+
+    tools_raw = body.get("tools", [])
+    for tool in tools_raw:
+        orig = tool.get("name", "")
+        short = _shorten_tool_name(orig)
+        if short != orig:
+            name_map[short] = orig
+            fwd_map[orig] = short
+
     messages = []
 
     # System prompt
@@ -92,11 +123,13 @@ def convert_request(body: dict, target_model: str) -> dict:
                 elif btype == "thinking":
                     thinking_parts.append(block.get("thinking", ""))
                 elif btype == "tool_use":
+                    tc_name = block["name"]
+                    tc_name = fwd_map.get(tc_name, tc_name)
                     tool_calls.append({
                         "id": block["id"],
                         "type": "function",
                         "function": {
-                            "name": block["name"],
+                            "name": tc_name,
                             "arguments": json.dumps(block.get("input", {})),
                         },
                     })
@@ -131,17 +164,18 @@ def convert_request(body: dict, target_model: str) -> dict:
         request["stop"] = body["stop_sequences"]
 
     # Tools
-    tools = body.get("tools")
-    if tools:
+    if tools_raw:
         converted = []
-        for tool in tools:
+        for tool in tools_raw:
             ttype = tool.get("type", "")
             if ttype in ("computer_20250124", "bash_20250124", "text_editor_20250124"):
                 continue
+            orig_name = tool["name"]
+            short_name = fwd_map.get(orig_name, orig_name)
             converted.append({
                 "type": "function",
                 "function": {
-                    "name": tool["name"],
+                    "name": short_name,
                     "description": tool.get("description", ""),
                     "parameters": tool.get("input_schema", {}),
                 },
@@ -158,9 +192,10 @@ def convert_request(body: dict, target_model: str) -> dict:
         elif t == "any":
             request["tool_choice"] = "required"
         elif t == "tool":
-            request["tool_choice"] = {"type": "function", "function": {"name": tc["name"]}}
+            tc_name = fwd_map.get(tc["name"], tc["name"])
+            request["tool_choice"] = {"type": "function", "function": {"name": tc_name}}
 
-    return request
+    return request, name_map
 
 
 # ── Think Tag Parser ──────────────────────────────────────
@@ -246,8 +281,10 @@ async def stream_response(
     client: AsyncOpenAI,
     openai_request: dict,
     original_model: str,
+    name_map: dict[str, str] | None = None,
 ) -> AsyncGenerator[str, None]:
     """Call NIM API and yield Anthropic SSE events."""
+    name_map = name_map or {}
 
     request_id = uuid.uuid4().hex[:24]
 
@@ -352,10 +389,12 @@ async def stream_response(
                         has_tools = True
                         if state != "none":
                             yield _close_block()
+                        short_name = tc.function.name if tc.function else ""
+                        restored_name = name_map.get(short_name, short_name)
                         yield _open_block(
                             "tool_use",
                             id=tc.id,
-                            name=tc.function.name if tc.function else "",
+                            name=restored_name,
                         )
                     if tc.function and tc.function.arguments:
                         yield sse("content_block_delta", {
