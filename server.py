@@ -20,6 +20,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
+import httpx
 
 from proxy import convert_request, stream_response
 
@@ -33,6 +34,7 @@ DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "meta/llama-3.3-70b-instruct")
 MODEL_MAP: dict = json.loads(os.getenv("MODEL_MAP", "{}"))
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8082"))
+TIMEOUT = int(os.getenv("TIMEOUT", "600"))  # seconds, generous for slow models
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,6 +47,7 @@ log = logging.getLogger("nim-proxy")
 client = AsyncOpenAI(
     base_url=NIM_BASE_URL,
     api_key=NVIDIA_API_KEY,
+    timeout=httpx.Timeout(TIMEOUT, connect=10),
 )
 
 
@@ -101,4 +104,4 @@ if __name__ == "__main__":
         exit(1)
     log.info(f"Starting NIM proxy on {HOST}:{PORT}")
     log.info(f"Default model: {DEFAULT_MODEL}")
-    uvicorn.run(app, host=HOST, port=PORT)
+    uvicorn.run(app, host=HOST, port=PORT, timeout_keep_alive=TIMEOUT)
