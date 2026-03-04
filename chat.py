@@ -170,14 +170,17 @@ def main():
     parser.add_argument("-s", "--system", default=None, help="system prompt override")
     parser.add_argument("-m", "--model", default=None, help="model override")
     parser.add_argument("-t", "--max-tokens", type=int, default=None, help="max tokens")
+    parser.add_argument("-T", "--timeout", type=int, default=None, help="요청 타임아웃(초, 기본 180)")
     parser.add_argument("--no-think", action="store_true", help="thinking 숨김")
     args = parser.parse_args()
 
-    global MODEL, MAX_TOKENS
+    global MODEL, MAX_TOKENS, TIMEOUT
     if args.model:
         MODEL = args.model
     if args.max_tokens:
         MAX_TOKENS = args.max_tokens
+    if args.timeout:
+        TIMEOUT = args.timeout
 
     system = args.system or SYSTEM
 

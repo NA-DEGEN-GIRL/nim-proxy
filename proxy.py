@@ -7,6 +7,7 @@ for NVIDIA NIM, and streams NIM responses back as Anthropic SSE events.
 
 import hashlib
 import json
+import logging
 import uuid
 from typing import AsyncGenerator
 
@@ -14,6 +15,17 @@ from openai import AsyncOpenAI
 
 
 MAX_TOOL_NAME_LEN = 64
+
+# 모델별 컨텍스트 한도 (tokens). 여기에 없으면 DEFAULT_CONTEXT_LIMIT 적용.
+MODEL_CONTEXT_LIMITS: dict[str, int] = {
+    "qwen/qwen3.5-397b-a17b": 202752,
+    "deepseek-ai/deepseek-v3-1": 160000,
+    "nvidia/glm-5-20b-chat": 205000,
+    "z-ai/glm5": 205000,
+}
+DEFAULT_CONTEXT_LIMIT = 131072
+# max_tokens(출력)을 뺀 뒤 추가로 빼는 안전 마진
+CONTEXT_SAFETY_MARGIN = 4096
 
 
 def _shorten_tool_name(name: str) -> str:
@@ -25,6 +37,139 @@ def _shorten_tool_name(name: str) -> str:
     # Reserve 1 char for separator + 8 for hash = 9
     prefix = name[:MAX_TOOL_NAME_LEN - 9]
     return f"{prefix}_{h}"
+
+
+# ── Token Estimation & Auto-Truncation ────────────────────
+
+
+def _estimate_tokens(messages: list[dict]) -> int:
+    """메시지 리스트의 대략적인 토큰 수를 추정한다. (1 token ≈ 4 chars)"""
+    total = 0
+    for msg in messages:
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            total += len(content) // 4
+        elif isinstance(content, list):
+            total += sum(len(json.dumps(b, ensure_ascii=False)) // 4 for b in content)
+        # tool_calls
+        if "tool_calls" in msg:
+            total += len(json.dumps(msg["tool_calls"], ensure_ascii=False)) // 4
+    return total
+
+
+def _estimate_tools_tokens(tools: list[dict]) -> int:
+    """도구 정의의 토큰 수를 추정한다."""
+    if not tools:
+        return 0
+    return len(json.dumps(tools, ensure_ascii=False)) // 4
+
+
+def truncate_messages(messages: list[dict], max_input_tokens: int, tools_tokens: int = 0) -> list[dict]:
+    """메시지를 max_input_tokens 이하로 잘라낸다.
+
+    전략:
+    - system 메시지(첫 번째)는 항상 유지
+    - 최근 메시지를 최대한 유지
+    - 오래된 메시지부터 제거
+    - tool 호출/결과 쌍은 함께 제거 (고아 방지)
+    """
+    if not messages:
+        return messages
+
+    available = max_input_tokens - tools_tokens
+    current = _estimate_tokens(messages)
+    if current <= available:
+        return messages
+
+    # system 메시지 분리
+    system_msgs = []
+    rest_msgs = []
+    for msg in messages:
+        if msg.get("role") == "system":
+            system_msgs.append(msg)
+        else:
+            rest_msgs.append(msg)
+
+    system_tokens = _estimate_tokens(system_msgs)
+    budget = available - system_tokens
+
+    if budget <= 0:
+        # system 메시지조차 너무 길면, system을 잘라냄
+        sys_text = system_msgs[0].get("content", "") if system_msgs else ""
+        max_chars = max_input_tokens * 4 // 2  # system에 절반 할당
+        system_msgs = [{"role": "system", "content": sys_text[:max_chars]}]
+        system_tokens = _estimate_tokens(system_msgs)
+        budget = available - system_tokens
+
+    # 최근 메시지부터 역순으로 추가
+    kept = []
+    used = 0
+    for msg in reversed(rest_msgs):
+        msg_tokens = _estimate_tokens([msg])
+        if used + msg_tokens <= budget:
+            kept.append(msg)
+            used += msg_tokens
+        else:
+            break
+
+    kept.reverse()
+
+    # tool_result가 있는데 대응하는 assistant tool_call이 없으면 제거
+    kept = _fix_orphan_tool_messages(kept)
+
+    # 잘린 메시지가 있으면 컨텍스트 압축 표시 삽입
+    n_dropped = len(rest_msgs) - len(kept)
+    if n_dropped > 0:
+        notice = {
+            "role": "user",
+            "content": f"[시스템: 컨텍스트 한도 초과로 이전 대화 {n_dropped}개 메시지가 생략되었습니다. 최근 대화만 유지됩니다.]",
+        }
+        return system_msgs + [notice] + kept
+
+    return system_msgs + kept
+
+
+def _fix_orphan_tool_messages(messages: list[dict]) -> list[dict]:
+    """고아 tool 메시지를 제거한다.
+
+    - tool_result가 있는데 대응하는 tool_call이 없으면 제거
+    - tool_call이 있는데 대응하는 tool_result가 없으면 제거
+    """
+    # tool_call ID 수집
+    call_ids = set()
+    result_ids = set()
+
+    for msg in messages:
+        if msg.get("role") == "assistant" and "tool_calls" in msg:
+            for tc in msg["tool_calls"]:
+                call_ids.add(tc.get("id", ""))
+        if msg.get("role") == "tool":
+            result_ids.add(msg.get("tool_call_id", ""))
+
+    # 대응되지 않는 것이 있으면 제거
+    orphan_call_ids = call_ids - result_ids
+    orphan_result_ids = result_ids - call_ids
+
+    if not orphan_call_ids and not orphan_result_ids:
+        return messages
+
+    filtered = []
+    for msg in messages:
+        if msg.get("role") == "tool" and msg.get("tool_call_id", "") in orphan_result_ids:
+            continue
+        if msg.get("role") == "assistant" and "tool_calls" in msg:
+            # 고아 tool_call만 있는 assistant 메시지에서 해당 call 제거
+            remaining_calls = [tc for tc in msg["tool_calls"] if tc.get("id", "") not in orphan_call_ids]
+            if not remaining_calls and not msg.get("content"):
+                continue  # 메시지 전체가 고아 tool_call만이면 제거
+            msg = dict(msg)
+            if remaining_calls:
+                msg["tool_calls"] = remaining_calls
+            else:
+                msg.pop("tool_calls", None)
+        filtered.append(msg)
+
+    return filtered
 
 
 # ── Anthropic -> OpenAI Request Conversion ────────────────
@@ -148,12 +293,45 @@ def convert_request(body: dict, target_model: str) -> tuple[dict, dict]:
                     assistant_msg["content"] = ""
             messages.append(assistant_msg)
 
+    # Tools 변환
+    converted_tools = []
+    if tools_raw:
+        for tool in tools_raw:
+            ttype = tool.get("type", "")
+            if ttype in ("computer_20250124", "bash_20250124", "text_editor_20250124"):
+                continue
+            orig_name = tool["name"]
+            short_name = fwd_map.get(orig_name, orig_name)
+            converted_tools.append({
+                "type": "function",
+                "function": {
+                    "name": short_name,
+                    "description": tool.get("description", ""),
+                    "parameters": tool.get("input_schema", {}),
+                },
+            })
+
+    # Auto-truncation: 컨텍스트 한도 초과 시 오래된 메시지 제거
+    max_tokens = min(body.get("max_tokens", 4096), 81920)
+    context_limit = MODEL_CONTEXT_LIMITS.get(target_model, DEFAULT_CONTEXT_LIMIT)
+    max_input_tokens = context_limit - max_tokens - CONTEXT_SAFETY_MARGIN
+    tools_tokens = _estimate_tools_tokens(converted_tools)
+
+    pre_count = _estimate_tokens(messages)
+    messages = truncate_messages(messages, max_input_tokens, tools_tokens)
+    post_count = _estimate_tokens(messages)
+    if post_count < pre_count:
+        logging.getLogger("nim-proxy").warning(
+            f"Auto-truncated: {pre_count} -> {post_count} tokens "
+            f"(limit {max_input_tokens}, dropped {pre_count - post_count})"
+        )
+
     # Build request
     request = {
         "model": target_model,
         "messages": messages,
         "stream": True,
-        "max_tokens": min(body.get("max_tokens", 4096), 81920),
+        "max_tokens": max_tokens,
     }
 
     if "temperature" in body:
@@ -163,25 +341,8 @@ def convert_request(body: dict, target_model: str) -> tuple[dict, dict]:
     if "stop_sequences" in body:
         request["stop"] = body["stop_sequences"]
 
-    # Tools
-    if tools_raw:
-        converted = []
-        for tool in tools_raw:
-            ttype = tool.get("type", "")
-            if ttype in ("computer_20250124", "bash_20250124", "text_editor_20250124"):
-                continue
-            orig_name = tool["name"]
-            short_name = fwd_map.get(orig_name, orig_name)
-            converted.append({
-                "type": "function",
-                "function": {
-                    "name": short_name,
-                    "description": tool.get("description", ""),
-                    "parameters": tool.get("input_schema", {}),
-                },
-            })
-        if converted:
-            request["tools"] = converted
+    if converted_tools:
+        request["tools"] = converted_tools
 
     # Tool choice
     tc = body.get("tool_choice")
