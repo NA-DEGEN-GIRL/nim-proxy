@@ -22,7 +22,7 @@ from openai import AsyncOpenAI
 from dotenv import load_dotenv
 import httpx
 
-from proxy import convert_request, stream_response
+from proxy import convert_request, stream_response, _estimate_text_tokens
 
 load_dotenv()
 
@@ -72,9 +72,29 @@ async def create_message(request: Request):
     original_model = body.get("model", "")
     target_model = resolve_model(original_model)
 
-    log.info(f"{original_model} -> {target_model}")
+    # 디버그: 요청 메타 정보 로깅
+    msgs = body.get("messages", [])
+    tool_count = len(body.get("tools", []))
+    log.info(f"{original_model} -> {target_model} | msgs={len(msgs)} tools={tool_count} max_tokens={body.get('max_tokens', '?')} system={'yes' if body.get('system') else 'no'}")
+    for i, m in enumerate(msgs[:5]):
+        role = m.get("role", "?")
+        content = m.get("content", "")
+        if isinstance(content, str):
+            preview = content[:100]
+        elif isinstance(content, list):
+            preview = str([c.get("type", "?") for c in content[:3]])
+        else:
+            preview = str(content)[:100]
+        log.info(f"  msg[{i}] {role}: {preview}")
+    if len(msgs) > 5:
+        log.info(f"  ... +{len(msgs)-5} more messages")
 
     openai_request, name_map = convert_request(body, target_model)
+
+    # 변환 후 요청 크기 로깅
+    oai_msgs = openai_request.get("messages", [])
+    total_chars = sum(len(str(m.get("content", ""))) for m in oai_msgs)
+    log.info(f"  -> converted: msgs={len(oai_msgs)} tools={len(openai_request.get('tools', []))} ~{total_chars} chars")
 
     if name_map:
         log.info(f"Shortened {len(name_map)} tool name(s): {list(name_map.values())}")
@@ -89,8 +109,8 @@ async def create_message(request: Request):
 @app.post("/v1/messages/count_tokens")
 async def count_tokens(request: Request):
     body = await request.json()
-    text = json.dumps(body.get("messages", []))
-    return JSONResponse({"input_tokens": len(text) // 4})
+    text = json.dumps(body.get("messages", []), ensure_ascii=False)
+    return JSONResponse({"input_tokens": _estimate_text_tokens(text)})
 
 
 @app.get("/health")

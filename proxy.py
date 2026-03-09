@@ -57,6 +57,11 @@ def _estimate_tokens(messages: list[dict]) -> int:
     return total
 
 
+def _estimate_text_tokens(text: str) -> int:
+    """단일 텍스트 문자열의 대략적인 토큰 수를 추정한다. (1 token ≈ 4 chars)"""
+    return len(text) // 4
+
+
 def _estimate_tools_tokens(tools: list[dict]) -> int:
     """도구 정의의 토큰 수를 추정한다."""
     if not tools:
@@ -536,6 +541,12 @@ async def stream_response(
 
             choice = chunk.choices[0]
             delta = choice.delta
+
+            # Reasoning content (e.g. gpt-oss-120b reasoning models)
+            reasoning_text = getattr(delta, "reasoning", None) or getattr(delta, "reasoning_content", None)
+            if reasoning_text:
+                output_tokens += len(reasoning_text) // 4
+                yield _emit_parsed("thinking", reasoning_text)
 
             # Text content
             if delta.content is not None and delta.content != "":
